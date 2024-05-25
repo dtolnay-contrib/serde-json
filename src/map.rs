@@ -8,13 +8,15 @@
 
 use crate::value::Value;
 use alloc::string::String;
+use core::any::TypeId;
 use core::borrow::Borrow;
 use core::fmt::{self, Debug};
 use core::hash::Hash;
 use core::iter::FusedIterator;
-#[cfg(feature = "preserve_order")]
-use core::mem;
+use core::marker::PhantomData;
+use core::mem::{self, ManuallyDrop};
 use core::ops;
+use core::ptr;
 use serde::de;
 
 #[cfg(not(feature = "preserve_order"))]
@@ -332,6 +334,36 @@ impl Map<String, Value> {
         F: FnMut(&String, &mut Value) -> bool,
     {
         self.map.retain(f);
+    }
+}
+
+impl<K, V> Drop for Map<K, V> {
+    fn drop(&mut self) {
+        trait NonStaticAny {
+            fn get_type_id(&self) -> TypeId
+            where
+                Self: 'static;
+        }
+
+        impl<T: ?Sized> NonStaticAny for PhantomData<T> {
+            fn get_type_id(&self) -> TypeId
+            where
+                Self: 'static,
+            {
+                TypeId::of::<T>()
+            }
+        }
+
+        let self_type = PhantomData::<Self>;
+        let self_type_id = NonStaticAny::get_type_id(unsafe {
+            mem::transmute::<&dyn NonStaticAny, &(dyn NonStaticAny + 'static)>(&self_type)
+        });
+        if self_type_id != TypeId::of::<Map<String, Value>>() {
+            return;
+        }
+
+        let this = unsafe { &mut *(self as *mut Map<K, V> as *mut Map<String, Value>) };
+        let map = mem::take(&mut this.map);
     }
 }
 
@@ -928,8 +960,10 @@ impl IntoIterator for Map<String, Value> {
     type IntoIter = IntoIter;
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
+        let this = ManuallyDrop::new(self);
+        let map = unsafe { ptr::read(&this.map) };
         IntoIter {
-            iter: self.map.into_iter(),
+            iter: map.into_iter(),
         }
     }
 }
